@@ -1,0 +1,7 @@
+[package]
+name = "libip6tc"
+version = "0.1.0"
+authors = ["Tjeu Kayim"]
+edition = "2018"
+
+[dependencies]
