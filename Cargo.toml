@@ -1,7 +1,9 @@
 [package]
-name = "libip6tc"
+name = "ip6tables"
 version = "0.1.0"
 authors = ["Tjeu Kayim"]
 edition = "2018"
 
 [dependencies]
+libip6tc-sys = { path = "../libip6tc-sys/" }
+errno = "0.2.5"
