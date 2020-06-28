@@ -20,38 +20,34 @@ impl Entry for Ipv6Addr {
 // impl Entry for sys::ipt_entry {}
 
 #[derive(Clone, Debug)]
-pub struct Rule<E: Entry> {
+struct RuleBuf<E: Entry> {
+    // ip6t_entry has 8 byte alignment (so does XT_ALIGN)
     ptr: NonNull<u8>,
     cap: usize,
     phantom: PhantomData<(Box<E>, Vec<sys::xt_entry_match>)>,
 }
 
-impl<E: Entry> Drop for Rule<E> {
-    fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
-        unsafe { Global.dealloc(self.ptr, layout) };
-    }
+#[derive(Clone, Debug)]
+pub struct Rule<E: Entry> {
+    buf: RuleBuf<E>,
 }
 
 #[derive(Clone, Debug)]
 pub struct RuleBuilder<E: Entry> {
-    // ip6t_entry has 8 byte alignment (so does XT_ALIGN)
-    ptr: NonNull<u8>,
-    cap: usize,
+    buf: RuleBuf<E>,
     len: usize,
-    phantom: PhantomData<(Box<E>, Vec<sys::xt_entry_match>)>,
-}
-
-impl<E: Entry> Drop for RuleBuilder<E> {
-    fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
-        unsafe { Global.dealloc(self.ptr, layout) };
-    }
 }
 
 struct Match<T> {
     m: sys::xt_entry_match,
     data: T,
+}
+
+impl<E: Entry> Drop for RuleBuf<E> {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
+        unsafe { Global.dealloc(self.ptr, layout) };
+    }
 }
 
 impl RuleBuilder<Ipv6Addr> {
@@ -60,7 +56,7 @@ impl RuleBuilder<Ipv6Addr> {
     }
 
     fn src(mut self, ip: Ipv6Addr) -> Self {
-        let mut entry = self.ptr.cast::<sys::ip6t_entry>();
+        let mut entry = self.buf.ptr.cast::<sys::ip6t_entry>();
         let entry = unsafe { entry.as_mut() };
         entry.ipv6.src.__in6_u.__u6_addr16 = ip.segments();
         self
@@ -77,15 +73,17 @@ impl<E: Entry> RuleBuilder<E> {
         let block = Global.alloc(layout, AllocInit::Zeroed)
             .unwrap_or_else(|_| handle_alloc_error(layout));
         RuleBuilder {
-            ptr: block.ptr,
-            cap: block.size,
-            len: size_of::<sys::ip6t_entry>(),
-            phantom: PhantomData,
+            buf: RuleBuf  {
+                ptr: block.ptr,
+                cap: block.size,
+                phantom: PhantomData,
+            },
+        len: size_of::<sys::ip6t_entry>(),
         }
     }
 
     // fn entry(&mut self) -> &mut sys::ip6t_entry {
-    //     unsafe { self.ptr.cast().as_mut() }
+    //     unsafe { self.buf.ptr.cast().as_mut() }
     // }
 
     fn extend<T>(&mut self) -> &mut T {
@@ -96,22 +94,22 @@ impl<E: Entry> RuleBuilder<E> {
 
         let old_len = self.len;
         self.len += size;
-        if self.len > self.cap {
-            let new_cap = 2 * self.cap;
-            let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
-            dbg!(self.cap, self.len, &layout);
-            let block = unsafe { Global.grow(self.ptr, 
+        if self.len > self.buf.cap {
+            let new_cap = 2 * self.buf.cap;
+            let layout = Layout::from_size_align(self.buf.cap, ALIGN).unwrap();
+            dbg!(self.buf.cap, self.len, &layout);
+            let block = unsafe { Global.grow(self.buf.ptr, 
                 layout,
                 new_cap,
                 ReallocPlacement::MayMove,
                 AllocInit::Zeroed
                 ) }.unwrap_or_else(|_| handle_alloc_error(layout));
-            self.ptr = block.ptr;
-            self.cap = block.size;
-            dbg!(self.ptr, self.cap);
+            self.buf.ptr = block.ptr;
+            self.buf.cap = block.size;
+            dbg!(self.buf.ptr, self.buf.cap);
         }
         
-        unsafe { &mut *(self.ptr.as_ptr().add(self.len) as *mut _) }
+        unsafe { &mut *(self.buf.ptr.as_ptr().add(self.len) as *mut _) }
     }
 
     fn match_comment(mut self, comment: &str) -> Self {
@@ -140,9 +138,7 @@ impl<E: Entry> RuleBuilder<E> {
         let data = self.extend::<sys::xt_standard_target>();
         data.verdict = sys::NF_ACCEPT as _;
         let rule = Rule {
-            ptr: self.ptr,
-            cap: self.cap,
-            phantom: PhantomData,
+            buf: self.buf.clone()
         };
         forget(self);
         rule
