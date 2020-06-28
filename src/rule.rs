@@ -3,13 +3,16 @@ use std::ffi::{CStr, CString};
 use std::mem::size_of;
 use std::net::Ipv6Addr;
 use std::os::raw::c_int;
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+const ALIGN: usize = size_of::<u64>();
 
 #[derive(Clone)]
-pub struct RuleBuilder<E, M, T> {
-    entry: E,
-    matches: M,
-    target: sys::xt_entry_target,
-    target_data: T,
+pub struct RuleBuilder<E> {
+    // ip6t_entry has 8 byte alignment (so does XT_ALIGN)
+    ptr: NonNull<u8>,
+    cap: usize,
+    len: usize,
 }
 
 pub struct Match<D, T> {
@@ -18,20 +21,37 @@ pub struct Match<D, T> {
     tail: T,
 }
 
-// pub struct Target
+impl RuleBuilder<sys::ip6t_entry> {
+    pub fn ip6() -> Self {
+        // Start with the standard size for IPv6
+        let cap = size_of<sys::ip6t_standard>() / ALIGN;
+        debug_assert_eq!(size_of::<sys::ip6t_standard>() % ALIGN, 0);
+        // buffer.resize(size_of::<sys::ip6t_entry>() / ALIGN);
+        // buffer: Vec::with_capacity(cap),
 
-impl RuleBuilder<(), (), ()> {
-    fn ip6() -> RuleBuilder<sys::ip6t_entry, (), ()> {
-        RuleBuilder {
-            entry: sys::ip6t_entry::default(),
-            matches: (),
-            target: sys::xt_entry_target::default(),
-            target_data: (),
+        let builder = RuleBuilder {
+            // matches: (),
+            // target: sys::xt_entry_target::default(),
+            // target_data: (),
         }
+        let size = builder.extend<sys::ip6t_entry>();
+        
     }
-}
 
-impl<M, T> RuleBuilder<sys::ip6t_entry, M, T> {
+    fn entry(&mut self) -> &mut sys::ip6t_entry {
+        &mut *(self.buffer.as_mut_ptr() as *mut u64 as *mut _)
+    }
+
+    fn extend<T>(&mut self) -> usize {
+        // see XT_ALIGN macro
+        let size = size_of::<T>();
+        let mask = ALIGN - 1;
+        let bytes = (size + mask) & !(mask);
+        let items = bytes / ALIGN;
+        self.buffer.resize(self.buffer.len() + items, 0);
+        bytes
+    }
+
     fn src(mut self, ip: Ipv6Addr) -> Self {
         self.entry.ipv6.src.__in6_u.__u6_addr16 = ip.segments();
         self
@@ -89,6 +109,12 @@ fn cast_signed(x: &mut [i8]) -> &mut [u8] {
 mod tests {
     use super::*;
     use std::net::Ipv6Addr;
+    use std::mem::align_of;
+
+    #[test]
+    fn builder_align() {
+        // align_of::<RuleBuilder>();
+    }
 
     #[test]
     fn it_works() {
