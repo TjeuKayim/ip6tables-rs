@@ -1,6 +1,6 @@
 use errno::errno;
 use libip6tc_sys as sys;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +41,7 @@ impl IptcError {
 //     }
 // }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use errno::*;

@@ -1,103 +1,151 @@
 use libip6tc_sys as sys;
-use std::ffi::{CStr, CString};
-use std::mem::size_of;
+use std::ffi::{CString};
+use std::mem::{size_of, size_of_val, forget};
 use std::net::Ipv6Addr;
-use std::os::raw::c_int;
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+// use std::os::raw::c_int;
+use std::alloc::{Layout, Global, AllocRef, AllocInit, ReallocPlacement, handle_alloc_error};
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::fmt;
 
 const ALIGN: usize = size_of::<u64>();
 
-#[derive(Clone)]
-pub struct RuleBuilder<E> {
+pub trait Entry: fmt::Debug + Clone {
+    type Sys;
+}
+
+impl Entry for Ipv6Addr {
+    type Sys = sys::ip6t_entry;
+}
+// impl Entry for sys::ipt_entry {}
+
+#[derive(Clone, Debug)]
+pub struct Rule<E: Entry> {
+    ptr: NonNull<u8>,
+    cap: usize,
+    phantom: PhantomData<(Box<E>, Vec<sys::xt_entry_match>)>,
+}
+
+impl<E: Entry> Drop for Rule<E> {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
+        unsafe { Global.dealloc(self.ptr, layout) };
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RuleBuilder<E: Entry> {
     // ip6t_entry has 8 byte alignment (so does XT_ALIGN)
     ptr: NonNull<u8>,
     cap: usize,
     len: usize,
+    phantom: PhantomData<(Box<E>, Vec<sys::xt_entry_match>)>,
 }
 
-pub struct Match<D, T> {
+impl<E: Entry> Drop for RuleBuilder<E> {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
+        unsafe { Global.dealloc(self.ptr, layout) };
+    }
+}
+
+struct Match<T> {
     m: sys::xt_entry_match,
-    data: D,
-    tail: T,
+    data: T,
 }
 
-impl RuleBuilder<sys::ip6t_entry> {
+impl RuleBuilder<Ipv6Addr> {
     pub fn ip6() -> Self {
-        // Start with the standard size for IPv6
-        let cap = size_of<sys::ip6t_standard>() / ALIGN;
-        debug_assert_eq!(size_of::<sys::ip6t_standard>() % ALIGN, 0);
-        // buffer.resize(size_of::<sys::ip6t_entry>() / ALIGN);
-        // buffer: Vec::with_capacity(cap),
-
-        let builder = RuleBuilder {
-            // matches: (),
-            // target: sys::xt_entry_target::default(),
-            // target_data: (),
-        }
-        let size = builder.extend<sys::ip6t_entry>();
-        
-    }
-
-    fn entry(&mut self) -> &mut sys::ip6t_entry {
-        &mut *(self.buffer.as_mut_ptr() as *mut u64 as *mut _)
-    }
-
-    fn extend<T>(&mut self) -> usize {
-        // see XT_ALIGN macro
-        let size = size_of::<T>();
-        let mask = ALIGN - 1;
-        let bytes = (size + mask) & !(mask);
-        let items = bytes / ALIGN;
-        self.buffer.resize(self.buffer.len() + items, 0);
-        bytes
+        RuleBuilder::new()
     }
 
     fn src(mut self, ip: Ipv6Addr) -> Self {
-        self.entry.ipv6.src.__in6_u.__u6_addr16 = ip.segments();
+        let mut entry = self.ptr.cast::<sys::ip6t_entry>();
+        let entry = unsafe { entry.as_mut() };
+        entry.ipv6.src.__in6_u.__u6_addr16 = ip.segments();
         self
     }
 }
 
-impl<E, M, T> RuleBuilder<E, M, T> {
-    fn match_comment(self, comment: &str) -> RuleBuilder<E, Match<sys::xt_comment_info, M>, T> {
+impl<E: Entry> RuleBuilder<E> {
+    fn new() -> Self {
+        // Start with the standard size for IPv6
+        let cap = size_of::<E::Sys>();
+        debug_assert_eq!(size_of::<E::Sys>() % ALIGN, 0);
+        // let ptr = unsafe { alloc_zeroed(Layout::from_size_align(cap, ALIGN).unwrap()) };
+        let layout = Layout::from_size_align(cap, ALIGN).unwrap();
+        let block = Global.alloc(layout, AllocInit::Zeroed)
+            .unwrap_or_else(|_| handle_alloc_error(layout));
+        RuleBuilder {
+            ptr: block.ptr,
+            cap: block.size,
+            len: size_of::<sys::ip6t_entry>(),
+            phantom: PhantomData,
+        }
+    }
+
+    // fn entry(&mut self) -> &mut sys::ip6t_entry {
+    //     unsafe { self.ptr.cast().as_mut() }
+    // }
+
+    fn extend<T>(&mut self) -> &mut T {
+        // see XT_ALIGN macro
+        let size = size_of::<T>();
+        let mask = ALIGN - 1;
+        let size = (size + mask) & !(mask);
+
+        let old_len = self.len;
+        self.len += size;
+        if self.len > self.cap {
+            let new_cap = 2 * self.cap;
+            let layout = Layout::from_size_align(self.cap, ALIGN).unwrap();
+            dbg!(self.cap, self.len, &layout);
+            let block = unsafe { Global.grow(self.ptr, 
+                layout,
+                new_cap,
+                ReallocPlacement::MayMove,
+                AllocInit::Zeroed
+                ) }.unwrap_or_else(|_| handle_alloc_error(layout));
+            self.ptr = block.ptr;
+            self.cap = block.size;
+            dbg!(self.ptr, self.cap);
+        }
+        
+        unsafe { &mut *(self.ptr.as_ptr().add(self.len) as *mut _) }
+    }
+
+    fn match_comment(mut self, comment: &str) -> Self {
         let comment_c = CString::new(comment).unwrap();
         const MAX: usize = sys::XT_MAX_COMMENT_LEN as _;
         assert!(comment.len() < MAX, "max length is 255 (plus null byte)");
         let mut comment = [0i8; MAX];
         cast_signed(&mut comment[0..comment_c.as_bytes().len()])
             .copy_from_slice(comment_c.as_bytes());
-
+        
         let name_c = CString::new("comment").unwrap();
         let mut name = [0i8; 29];
         cast_signed(&mut name[0..name_c.as_bytes().len()]).copy_from_slice(name_c.as_bytes());
 
-        let m = Match {
-            m: sys::xt_entry_match {
-                match_size: (size_of::<sys::xt_entry_match>() + size_of::<sys::xt_comment_info>())
-                    as _,
-                name,
-                revision: 0,
-                align: [],
-            },
-            data: sys::xt_comment_info { comment },
-            tail: self.matches,
-        };
-        RuleBuilder {
-            matches: m,
-            entry: self.entry,
-            target: self.target,
-            target_data: self.target_data,
-        }
+        let m = self.extend::<Match<sys::xt_comment_info>>();
+        m.m.match_size = size_of_val(&m) as _;
+        m.m.name = name;
+        m.m.revision = 0;
+        m.data = sys::xt_comment_info { comment };
+        dbg!("comment");
+        self
     }
 
-    fn target_accept(self) -> RuleBuilder<E, M, c_int> {
-        assert_eq!(size_of::<T>(), 0);
-        RuleBuilder {
-            target_data: sys::NF_ACCEPT as _,
-            entry: self.entry,
-            matches: self.matches,
-            target: self.target,
-        }
+    fn target_accept(mut self) -> Rule<E> {
+        dbg!("target");
+        let data = self.extend::<sys::xt_standard_target>();
+        data.verdict = sys::NF_ACCEPT as _;
+        let rule = Rule {
+            ptr: self.ptr,
+            cap: self.cap,
+            phantom: PhantomData,
+        };
+        forget(self);
+        rule
     }
 }
 
@@ -108,19 +156,15 @@ fn cast_signed(x: &mut [i8]) -> &mut [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv6Addr;
-    use std::mem::align_of;
 
     #[test]
-    fn builder_align() {
-        // align_of::<RuleBuilder>();
-    }
-
-    #[test]
-    fn it_works() {
-        let rule = RuleBuilder::ip6()
-            .src("2001:db8::".parse().unwrap()) // TODO: ip net crate support
-            .match_comment("hello world")
-            .target_accept();
+    fn build_rule() {
+        // let builder = RuleBuilder::ip6();
+        // builder.src("2001:db8::".parse().unwrap());
+        // builder.match_comment("hello world");
+        let builder = RuleBuilder::ip6()
+            .src("2001:db8::".parse().unwrap())
+            .match_comment("hello world");
+        let _rule: Rule<_> = builder.target_accept();
     }
 }

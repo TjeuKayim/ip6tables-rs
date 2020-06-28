@@ -1,3 +1,5 @@
+#![feature(allocator_api)]
+
 mod error;
 mod rule;
 
@@ -43,6 +45,6 @@ mod tests {
 
     #[test]
     fn it_works() {
-        // let c = Chain6::new("mangle", "TEST");
+        let _t = Table6::new("mangle");
     }
 }
