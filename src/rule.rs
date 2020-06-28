@@ -96,7 +96,7 @@ impl<E: Entry> RuleBuilder<E> {
         let old_len = self.len;
         self.len += size;
         if self.len > self.buf.cap {
-            let new_cap = 2 * self.buf.cap;
+            let new_cap = 2 * self.len;
             let layout = Layout::from_size_align(self.buf.cap, ALIGN).unwrap();
             dbg!(self.buf.cap, self.len, &layout);
             let block = unsafe {
@@ -113,8 +113,8 @@ impl<E: Entry> RuleBuilder<E> {
             self.buf.cap = block.size;
             dbg!(self.buf.ptr, self.buf.cap);
         }
-        
-        unsafe { &mut *(self.buf.ptr.as_ptr().add(self.len) as *mut _) }
+
+        unsafe { &mut *(self.buf.ptr.as_ptr().add(old_len) as *mut _) }
     }
 
     fn match_comment(mut self, comment: &str) -> Self {
