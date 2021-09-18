@@ -2,6 +2,8 @@
 
 This crate directly calls libip6tc/libiptc to edit iptable-rules.
 
+Project status: **Unfinished and abandoned**
+
 ## Unsafe
 
 *Warning: This is my first public library that uses unsafe Rust.*
